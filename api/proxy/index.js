@@ -1,5 +1,8 @@
-const { Client } = require('@notionhq/client');
+// ... 以下の Toggl ヘルパー関数が続く ...
 
+
+const { Client } = require('@notionhq/client');
+const fetch = require('node-fetch');
 // =========================================================
 // Toggl 関連のヘルパー関数
 // =========================================================
