@@ -53,12 +53,14 @@ async function stopRunningTogglEntry(token) {
 // =========================================================
 
 module.exports = async (req, res) => {
-    // CORS設定
+    // ★★★ CORS設定を最も強力な形に強化 ★★★
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PATCH');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'true'); // クレデンシャルを許可
 
     if (req.method === 'OPTIONS') {
+        // プリフライトリクエストをここで正常終了させる
         return res.status(200).end();
     }
 
@@ -115,7 +117,7 @@ module.exports = async (req, res) => {
                 const authHeader = 'Basic ' + Buffer.from(`${tokenValue}:api_token`).toString('base64');
                 const startEntryUrl = 'https://api.track.toggl.com/api/v9/time_entries';
                 
-                // ★★★ 修正ポイント: workspaceIdを必ず数値に変換する ★★★
+                // workspaceIdを必ず数値に変換する
                 const numericWorkspaceId = parseInt(workspaceId, 10);
                 if (isNaN(numericWorkspaceId)) {
                     return res.status(400).json({ message: 'Invalid workspaceId format.' });
@@ -137,12 +139,10 @@ module.exports = async (req, res) => {
                 });
 
                 if (!newEntryResponse.ok) {
-    const errorText = await newEntryResponse.text();
-    // Togglからの詳細なエラーメッセージ（400 Bad Requestの詳細）を返す
-    console.error('Toggl Start Error:', newEntryResponse.status, errorText); // ★ 修正: ステータスコードを追加
-    return res.status(newEntryResponse.status).json({ message: 'Failed to start Toggl entry', details: errorText });
-}
-
+                    const errorText = await newEntryResponse.text();
+                    console.error('Toggl Start Error:', newEntryResponse.status, errorText);
+                    return res.status(newEntryResponse.status).json({ message: 'Failed to start Toggl entry', details: errorText });
+                }
 
                 const newEntry = await newEntryResponse.json();
                 return res.status(200).json(newEntry);
