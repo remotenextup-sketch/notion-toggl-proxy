@@ -1,8 +1,8 @@
 {
-  "functions": {
-    "api/proxy.js": {
-      "runtime": "nodejs18.x"
+  "rewrites": [
+    {
+      "source": "/api/proxy",
+      "destination": "/api/proxy.cjs"
     }
-  },
-  "rewrites": [{ "source": "/api/proxy", "destination": "/api/proxy.cjs" }]
+  ]
 }
