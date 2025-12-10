@@ -1,8 +1,6 @@
-// ... 以下の Toggl ヘルパー関数が続く ...
-
-
 const { Client } = require('@notionhq/client');
 const fetch = require('node-fetch');
+
 // =========================================================
 // Toggl 関連のヘルパー関数
 // =========================================================
@@ -13,6 +11,7 @@ const fetch = require('node-fetch');
  * @returns {Promise<object|null>} 停止されたエントリー、またはnull
  */
 async function stopRunningTogglEntry(token) {
+    // Basic認証ヘッダーを生成 (Toggl APIトークン:api_token)
     const authHeader = 'Basic ' + Buffer.from(`${token}:api_token`).toString('base64');
     const currentEntryUrl = 'https://api.track.toggl.com/api/v9/me/time_entries/current';
     
@@ -25,12 +24,18 @@ async function stopRunningTogglEntry(token) {
         }
     });
 
+    // 実行中のエントリがない場合（204 No Contentなど）は、そのままnullを返す
+    if (currentEntryResponse.status === 204) {
+        return null;
+    }
+    
+    // エラーレスポンスの場合
     if (!currentEntryResponse.ok) {
-        // 実行中のエントリがない（204 No Contentなど）場合も含むため、正常系として扱う
-        return null; 
+        throw new Error(`Toggl API error (GET /current): ${currentEntryResponse.statusText}`);
     }
     
     const currentEntry = await currentEntryResponse.json();
+    
     if (currentEntry && currentEntry.id) {
         // 実行中のエントリがあれば停止APIを呼び出す
         const stopUrl = `https://api.track.toggl.com/api/v9/time_entries/${currentEntry.id}/stop`;
@@ -63,7 +68,7 @@ module.exports = async (req, res) => {
     // リクエストボディのパース
     const { 
         targetUrl, method, body, tokenKey, tokenValue, // Notion/Toggl直接呼び出し用
-        customEndpoint, dbId, dataSourceId // カスタムエンドポイント用
+        customEndpoint, dbId, dataSourceId, workspaceId, description // カスタムエンドポイント用に追加
     } = req.body;
 
     // トークンが提供されていない場合のエラーハンドリング
@@ -91,7 +96,7 @@ module.exports = async (req, res) => {
                 const categories = properties['カテゴリ']?.select?.options?.map(opt => opt.name) || [];
                 const departments = properties['部門']?.multi_select?.options?.map(opt => opt.name) || [];
 
-                // ワークスペースID（データソースIDの先頭部分）を取得
+                // データベースURLからデータソースIDを取得
                 const match = database.url.match(/notion\.so\/([a-f0-9]+)\/([a-f0-9]+)/);
                 const dataSourceIdFromUrl = match ? match[1] : null;
 
@@ -99,16 +104,15 @@ module.exports = async (req, res) => {
             }
 
             // ---------------------------------------------
-            // A-2. Toggl計測開始 (startTogglTracking) - ★今回追加したToggl連携ロジック★
+            // A-2. Toggl計測開始 (startTogglTracking) - ★修正反映箇所★
             // ---------------------------------------------
             else if (customEndpoint === 'startTogglTracking') {
-                const { workspaceId, description } = req.body;
                 
                 if (!workspaceId || !description) {
                     return res.status(400).json({ message: 'Toggl parameters missing (workspaceId or description).' });
                 }
 
-                // 1. 既存の計測を停止 (自動で前のタスクを終了させる)
+                // 1. 既存の計測を停止 (Toggl APIトークンは tokenValue で渡される)
                 await stopRunningTogglEntry(tokenValue); 
 
                 // 2. 新しいタイムエントリーを開始
@@ -122,8 +126,9 @@ module.exports = async (req, res) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        // Toggl API v9 は time_entry オブジェクトでラップする必要がない
                         description: description,
-                        workspace_id: workspaceId,
+                        workspace_id: parseInt(workspaceId, 10), // V9ではIDを数値型で送る
                         created_with: 'NotionTogglTimerApp',
                         start: new Date().toISOString(),
                         duration: -1 // 計測中を示す
@@ -131,9 +136,9 @@ module.exports = async (req, res) => {
                 });
 
                 if (!newEntryResponse.ok) {
-                    const errorText = await newEntryResponse.text();
-                    // Togglからの詳細なエラーメッセージをJSONで返す
-                    return res.status(newEntryResponse.status).json({ message: 'Failed to start Toggl entry', details: errorText });
+                    const errorBody = await newEntryResponse.json();
+                    console.error('Toggl Start Error:', errorBody);
+                    return res.status(newEntryResponse.status).json({ message: 'Failed to start Toggl entry', details: errorBody });
                 }
 
                 const newEntry = await newEntryResponse.json();
@@ -141,7 +146,7 @@ module.exports = async (req, res) => {
             }
             
             // ---------------------------------------------
-            // A-3. KPIデータ取得 (getKpi)
+            // A-3. KPIデータ取得 (getKpi) - ※30日フィルターは適用せず、オリジナルロジック維持
             // ---------------------------------------------
             else if (customEndpoint === 'getKpi') {
                 if (!dataSourceId) {
@@ -149,18 +154,12 @@ module.exports = async (req, res) => {
                 }
                 const notion = new Client({ auth: tokenValue });
                 
-                // データソースIDからDB IDを推測（Vercel側では必要ないが、Notion APIの仕様上、datasource_idはpage_idとは異なるため、
-                // URLから取得したIDを使っているはず）
                 const databaseId = dataSourceId; 
                 
-                // 例として、過去30日間のデータを取得
                 const now = new Date();
                 const thirtyDaysAgo = new Date(now.getTime() - (30 * 24 * 60 * 60 * 1000)).toISOString().split('T')[0];
                 
-                // TODO: 実際のDBの「時間」プロパティ名に合わせて修正が必要
-                const timeProperty = '時間'; 
-
-                // データベースから「完了」タスクを取得
+                // 【警告】このロジックはパフォーマンス上の問題を抱えています（全完了タスクを取得後、JSでフィルタリングするため）
                 const response = await notion.databases.query({
                     database_id: databaseId,
                     filter: {
@@ -176,15 +175,19 @@ module.exports = async (req, res) => {
                 const oneWeekAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
                 
                 response.results.forEach(page => {
+                    // TODO: 実際のDBの「時間」プロパティ名に合わせて修正が必要
+                    const timeProperty = '時間'; 
                     const timeProp = page.properties[timeProperty]?.formula?.number; 
                     const completedDate = page.properties['完了日']?.date?.start;
                     const category = page.properties['カテゴリ']?.select?.name;
 
                     if (timeProp) {
-                        const mins = Math.round(timeProp * 60); // Toggl時間（h）を分に変換
+                        const mins = Math.round(timeProp * 60); 
                         
-                        // 月間集計
-                        totalMonthMins += mins; 
+                        // 月間集計 (30日以内に絞らず全件加算しているが、クライアント側で30日間のデータが必要な場合は要修正)
+                        // ここでは、一旦、すべての完了タスクの時間を加算します。
+                        // このロジックは意図が不明瞭なため、クライアント側のKPI表示と整合性を取る必要があります。
+                        // totalMonthMins += mins; 
                         
                         // 週間集計
                         if (completedDate && new Date(completedDate) >= oneWeekAgo) {
@@ -192,6 +195,15 @@ module.exports = async (req, res) => {
                             if (category) {
                                 categoryWeekMins[category] = (categoryWeekMins[category] || 0) + mins;
                             }
+                        }
+                    }
+                    
+                    // 月間集計も日付フィルター（30日以内）を追加
+                    if (completedDate && new Date(completedDate) >= new Date(thirtyDaysAgo)) {
+                        const timeProp = page.properties[timeProperty]?.formula?.number;
+                        if (timeProp) {
+                             const mins = Math.round(timeProp * 60);
+                             totalMonthMins += mins;
                         }
                     }
                 });
@@ -203,6 +215,7 @@ module.exports = async (req, res) => {
             // A-4. 未定義のエンドポイント
             // ---------------------------------------------
             else {
+                // クライアントから startTogglTracking が来ても、このブロックには到達しません
                 return res.status(400).json({ message: 'Invalid custom endpoint.' });
             }
         }
@@ -220,7 +233,7 @@ module.exports = async (req, res) => {
                 authHeader = `Bearer ${tokenValue}`;
             } else if (isToggl) {
                 // TogglはBasic認証 (トークン:api_token)
-                authHeader = 'Basic ' + Buffer.from(`${tokenValue}:api_token`).toString('base64');
+                authHeader = 'Basic ' + Buffer.from(`${tokenValue}:api_token').toString('base64');
             } else {
                 return res.status(400).json({ message: 'Invalid token key.' });
             }
